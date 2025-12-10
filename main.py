@@ -110,22 +110,18 @@ async def iclock_cdata(request: Request):
         cur = conn.cursor()
 
         if request.method == "GET":
-            # handshake
             data = {"method": "GET", "query": params}
             cur.execute(
                 """
-                INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, bruto_json)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, sn, tipo, method, bruto_json)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                ("HANDSHAKE", now, sn, Json(data)),
+                ("HANDSHAKE", now, sn, sn, "HANDSHAKE", "GET", Json(data)),
             )
-            print("ICLOCK GET:", params)
 
         else:  # POST
             raw_bytes = await request.body()
             raw_text = raw_bytes.decode("utf-8", errors="ignore") if raw_bytes else ""
-            print("ICLOCK POST RAW:", raw_text)
-
             lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
 
             for line in lines:
@@ -138,37 +134,40 @@ async def iclock_cdata(request: Request):
                 # --- DEVINFO (~DeviceName=...) ---
                 if first.startswith("~"):
                     data = {
-                        "method": "POST",
-                        "tipo": "DEVINFO",
+                        "sn": sn,
                         "raw": line,
+                        "tipo": "DEVINFO",
+                        "method": "POST",
                     }
                     cur.execute(
                         """
-                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, bruto_json)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo,
+                                              sn, tipo, method, bruto_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """,
-                        ("DEVINFO", now, sn, Json(data)),
+                        ("DEVINFO", now, sn, sn, "DEVINFO", "POST", Json(data)),
                     )
                     continue
 
                 # --- OPLOG ... ---
                 if first.startswith("OPLOG"):
                     data = {
-                        "method": "POST",
-                        "tipo": "OPLOG",
+                        "sn": sn,
                         "raw": line,
+                        "tipo": "OPLOG",
+                        "method": "POST",
                     }
                     cur.execute(
                         """
-                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, bruto_json)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo,
+                                              sn, tipo, method, bruto_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """,
-                        ("OPLOG", now, sn, Json(data)),
+                        ("OPLOG", now, sn, sn, "OPLOG", "POST", Json(data)),
                     )
                     continue
 
                 # --- ATTLOG (marcajes) ---
-                # PIN \t Time \t Verified \t Status \t WorkCode...
                 if len(parts) >= 2:
                     pin = parts[0].strip()
                     time_str = parts[1].strip()
@@ -182,32 +181,46 @@ async def iclock_cdata(request: Request):
                         ts = now
 
                     data = {
-                        "method": "POST",
-                        "tipo": "ATTLOG",
-                        "raw": line,
-                        "pin": pin,
-                        "time": time_str,
-                        "verified": verified,
-                        "status": status,
-                        "workcode": workcode,
                         "sn": sn,
+                        "pin": pin,
+                        "raw": line,
+                        "time": time_str,
+                        "tipo": "ATTLOG",
+                        "method": "POST",
+                        "status": status,
+                        "verified": verified,
+                        "workcode": workcode,
                     }
 
                     cur.execute(
                         """
-                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, bruto_json)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO marcajes (
+                            zk_user_id, fecha_hora, dispositivo_codigo,
+                            sn, tipo, method, verified, status, workcode, bruto_json
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
-                        (pin, ts, sn, Json(data)),
+                        (
+                            pin,
+                            ts,
+                            sn,
+                            sn,
+                            "ATTLOG",
+                            "POST",
+                            verified,
+                            status,
+                            workcode,
+                            Json(data),
+                        ),
                     )
                 else:
-                    # línea rara, la guardamos tal cual
                     cur.execute(
                         """
-                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, bruto_json)
-                        VALUES (%s, %s, %s, %s)
+                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo,
+                                              sn, tipo, method, bruto_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """,
-                        ("UNKNOWN", now, sn, Json({"raw": line})),
+                        ("UNKNOWN", now, sn, sn, "UNKNOWN", "POST", Json({"raw": line})),
                     )
 
         conn.commit()
