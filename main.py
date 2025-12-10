@@ -31,7 +31,9 @@ async def receive_zk(
         example={
             "user_id": "123",
             "timestamp": "2025-12-08 14:30:00",
-            "device_id": "TEST01"
+            "device_id": "TEST01",
+            "DeviceID": "001",
+            "sn": "SERIAL123"
         },
     ),
 ):
@@ -39,25 +41,45 @@ async def receive_zk(
     if token != ZK_TOKEN:
         raise HTTPException(status_code=403, detail="Token invalid")
 
-    # Extraer datos básicos
-    user = str(body.get("user_id") or body.get("pin") or "unknown")
-    raw_ts = body.get("timestamp") or body.get("time") or body.get("LogTime")
+    # ===== Extraer datos básicos =====
+    # Usuario (según el campo que traiga el reloj)
+    user = str(
+        body.get("user_id")
+        or body.get("pin")
+        or body.get("PIN")
+        or "unknown"
+    )
+
+    # Fecha/hora del marcaje
+    raw_ts = (
+        body.get("timestamp")
+        or body.get("time")
+        or body.get("LogTime")
+    )
 
     try:
         ts = datetime.fromisoformat(str(raw_ts).replace("T", " ").split(".")[0])
     except Exception:
         ts = datetime.utcnow()
 
-    # Guardar en BD
+    # Código del dispositivo (según lo que envíe el equipo)
+    dispositivo_codigo = (
+        str(body.get("device_id"))
+        or str(body.get("DeviceID"))
+        or str(body.get("sn"))
+        or "DESCONOCIDO"
+    )
+
+    # ===== Guardar en BD =====
     try:
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO marcajes (zk_user_id, fecha_hora, bruto_json)
-            VALUES (%s, %s, %s)
+            INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, bruto_json)
+            VALUES (%s, %s, %s, %s)
             """,
-            (user, ts, Json(body)),
+            (user, ts, dispositivo_codigo, Json(body)),
         )
         conn.commit()
         cur.close()
