@@ -98,3 +98,27 @@ async def receive_zk(
         raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
     return {"ok": True}
+
+@app.post("/{catchall:path}")
+async def zk_catch_all(catchall: str, body: dict = Body(None)):
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO marcajes (zk_user_id, fecha_hora, bruto_json)
+            VALUES (%s, %s, %s)
+            """,
+            (
+                "unknown",
+                datetime.utcnow(),
+                Json(body or {"raw": "empty"}),
+            ),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+
+    return {"ok": True, "path": catchall}
