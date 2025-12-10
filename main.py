@@ -3,6 +3,7 @@ from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 import psycopg2
 from psycopg2.extras import Json
 
@@ -35,6 +36,7 @@ def get_conn():
     )
 
 
+# ---- Endpoint de pruebas manuales con JSON ----
 @app.post("/zk/{token}")
 async def receive_zk(
     token: str,
@@ -49,11 +51,9 @@ async def receive_zk(
         },
     ),
 ):
-    # Validar token
     if token != ZK_TOKEN:
         raise HTTPException(status_code=403, detail="Token invalid")
 
-    # Usuario
     user = str(
         body.get("user_id")
         or body.get("pin")
@@ -61,7 +61,6 @@ async def receive_zk(
         or "unknown"
     )
 
-    # Fecha/hora
     raw_ts = (
         body.get("timestamp")
         or body.get("time")
@@ -72,7 +71,6 @@ async def receive_zk(
     except Exception:
         ts = datetime.utcnow()
 
-    # Código de dispositivo
     dispositivo_codigo = (
         str(body.get("device_id"))
         or str(body.get("DeviceID"))
@@ -96,42 +94,55 @@ async def receive_zk(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
-    print("ZK ENDPOINT /zk hit:", body)  # lo verás en logs de Render
+    print("ZK JSON ENDPOINT /zk HIT:", body)
     return {"ok": True}
 
 
-# 👉 Catch-all para capturar lo que mande el reloj aunque use otra ruta
-@app.post("/{catchall:path}")
-async def zk_catch_all(
-    catchall: str,
-    request: Request,
-):
-    try:
-        body = await request.json()
-    except Exception:
-        body = {"raw": "no-json-body"}
-
-    print("CATCH_ALL HIT:", catchall, body)  # aparecerá en los logs de Render
+# ---- Endpoint oficial ADMS ZKTeco ----
+@app.api_route("/iclock/cdata", methods=["GET", "POST"])
+async def iclock_cdata(request: Request):
+    """
+    Implementación mínima del protocolo ADMS:
+    - GET: handshake del dispositivo -> respondemos 'OK'
+    - POST: envío de marcajes en texto plano -> guardamos raw y respondemos 'OK'
+    """
+    now = datetime.utcnow()
 
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, bruto_json)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (
-                "unknown",
-                datetime.utcnow(),
-                catchall[:50],  # usamos el path como "dispositivo_codigo" provisional
-                Json(body),
-            ),
-        )
+
+        if request.method == "GET":
+            # Guardamos el handshake con los query params
+            params = dict(request.query_params)
+            data = {"method": "GET", "query": params}
+            cur.execute(
+                """
+                INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, bruto_json)
+                VALUES (%s, %s, %s, %s)
+                """,
+                ("iclock_get", now, "iclock/cdata", Json(data)),
+            )
+            print("ICLOCK GET:", params)
+
+        else:  # POST
+            raw_bytes = await request.body()
+            raw_text = raw_bytes.decode("utf-8", errors="ignore") if raw_bytes else ""
+            data = {"method": "POST", "raw": raw_text}
+            cur.execute(
+                """
+                INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, bruto_json)
+                VALUES (%s, %s, %s, %s)
+                """,
+                ("iclock_post", now, "iclock/cdata", Json(data)),
+            )
+            print("ICLOCK POST RAW:", raw_text)
+
         conn.commit()
         cur.close()
         conn.close()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
-    return {"ok": True, "path": catchall}
+    # ZKTeco espera texto plano 'OK'
+    return PlainTextResponse("OK")
