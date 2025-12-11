@@ -219,12 +219,12 @@ async def iclock_cdata(request: Request):
                         ON CONFLICT (zk_user_id, fecha_hora, dispositivo_codigo) DO NOTHING
                         """,
                         (
-                            pin,
-                            ts,
-                            sn,     -- dispositivo_codigo
-                            sn,     -- sn
-                            "ATTLOG",
-                            "POST",
+                            pin,          # zk_user_id
+                            ts,           # fecha_hora
+                            sn,           # dispositivo_codigo
+                            sn,           # sn
+                            "ATTLOG",     # tipo
+                            "POST",       # method
                             verified,
                             status,
                             workcode,
