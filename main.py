@@ -36,7 +36,10 @@ def get_conn():
     )
 
 
-# ---- Endpoint de pruebas manuales con JSON ----
+# ============================================================
+#  Endpoint de pruebas manuales con JSON (/zk/{token})
+#  (NO lo usa el reloj, solo Postman / Swagger)
+# ============================================================
 @app.post("/zk/{token}")
 async def receive_zk(
     token: str,
@@ -81,10 +84,12 @@ async def receive_zk(
     try:
         conn = get_conn()
         cur = conn.cursor()
+        # aquí no usamos sn/tipo/etc. porque es solo para pruebas
         cur.execute(
             """
             INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, bruto_json)
             VALUES (%s, %s, %s, %s)
+            ON CONFLICT (zk_user_id, fecha_hora, dispositivo_codigo) DO NOTHING
             """,
             (user, ts, dispositivo_codigo, Json(body)),
         )
@@ -98,7 +103,11 @@ async def receive_zk(
     return {"ok": True}
 
 
-# ---- Endpoint oficial ADMS ZKTeco ----
+# ============================================================
+#  Endpoint oficial ADMS ZKTeco: /iclock/cdata
+#  - GET: handshake
+#  - POST: marcajes ATTLOG, OPLOG, DEVINFO
+# ============================================================
 @app.api_route("/iclock/cdata", methods=["GET", "POST"])
 async def iclock_cdata(request: Request):
     now = datetime.utcnow()
@@ -110,16 +119,20 @@ async def iclock_cdata(request: Request):
         cur = conn.cursor()
 
         if request.method == "GET":
+            # Handshake del dispositivo
             data = {"method": "GET", "query": params}
             cur.execute(
                 """
-                INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, sn, tipo, method, bruto_json)
+                INSERT INTO marcajes (
+                    zk_user_id, fecha_hora, dispositivo_codigo,
+                    sn, tipo, method, bruto_json
+                )
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 ("HANDSHAKE", now, sn, sn, "HANDSHAKE", "GET", Json(data)),
             )
 
-        else:  # POST
+        else:  # POST -> datos reales
             raw_bytes = await request.body()
             raw_text = raw_bytes.decode("utf-8", errors="ignore") if raw_bytes else ""
             lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
@@ -141,8 +154,10 @@ async def iclock_cdata(request: Request):
                     }
                     cur.execute(
                         """
-                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo,
-                                              sn, tipo, method, bruto_json)
+                        INSERT INTO marcajes (
+                            zk_user_id, fecha_hora, dispositivo_codigo,
+                            sn, tipo, method, bruto_json
+                        )
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """,
                         ("DEVINFO", now, sn, sn, "DEVINFO", "POST", Json(data)),
@@ -159,8 +174,10 @@ async def iclock_cdata(request: Request):
                     }
                     cur.execute(
                         """
-                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo,
-                                              sn, tipo, method, bruto_json)
+                        INSERT INTO marcajes (
+                            zk_user_id, fecha_hora, dispositivo_codigo,
+                            sn, tipo, method, bruto_json
+                        )
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """,
                         ("OPLOG", now, sn, sn, "OPLOG", "POST", Json(data)),
@@ -199,12 +216,13 @@ async def iclock_cdata(request: Request):
                             sn, tipo, method, verified, status, workcode, bruto_json
                         )
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (zk_user_id, fecha_hora, dispositivo_codigo) DO NOTHING
                         """,
                         (
                             pin,
                             ts,
-                            sn,
-                            sn,
+                            sn,     -- dispositivo_codigo
+                            sn,     -- sn
                             "ATTLOG",
                             "POST",
                             verified,
@@ -214,10 +232,13 @@ async def iclock_cdata(request: Request):
                         ),
                     )
                 else:
+                    # línea rara que no encaja en nada; se guarda cruda
                     cur.execute(
                         """
-                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo,
-                                              sn, tipo, method, bruto_json)
+                        INSERT INTO marcajes (
+                            zk_user_id, fecha_hora, dispositivo_codigo,
+                            sn, tipo, method, bruto_json
+                        )
                         VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """,
                         ("UNKNOWN", now, sn, sn, "UNKNOWN", "POST", Json({"raw": line})),
@@ -229,4 +250,46 @@ async def iclock_cdata(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
+    # ZKTeco espera texto plano "OK"
     return PlainTextResponse("OK")
+
+
+# ============================================================
+#  Endpoints para comandos (de momento sin comandos)
+#  /iclock/getrequest y /iclock/devicecmd
+# ============================================================
+@app.get("/iclock/getrequest")
+async def iclock_getrequest(request: Request):
+    now = datetime.utcnow()
+    params = dict(request.query_params)
+    sn = params.get("SN") or params.get("sn") or "UNKNOWN_SN"
+
+    # opcional: loguear que el equipo pidió comandos
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO marcajes (
+                zk_user_id, fecha_hora, dispositivo_codigo,
+                sn, tipo, method, bruto_json
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            ("GETREQUEST", now, sn, sn, "GETREQUEST", "GET", Json({"query": params})),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        # si falla BD, no bloqueamos la comunicación
+        pass
+
+    # Por ahora no enviamos comandos, así que respondemos vacío
+    return PlainTextResponse("")
+
+
+@app.get("/iclock/devicecmd")
+async def iclock_devicecmd(request: Request):
+    # algunos firmwares consultan aquí en vez de /iclock/getrequest
+    return await iclock_getrequest(request)
