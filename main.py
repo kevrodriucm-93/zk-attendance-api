@@ -110,9 +110,16 @@ async def receive_zk(
 # ============================================================
 @app.api_route("/iclock/cdata", methods=["GET", "POST"])
 async def iclock_cdata(request: Request):
+    """
+    Modo CAJA NEGRA:
+    - GET: guardamos handshake con query params.
+    - POST: guardamos TODO el body crudo + query params.
+    No se intenta parsear ATTLOG/OPLOG/DEVINFO.
+    """
     now = datetime.utcnow()
     params = dict(request.query_params)
     sn = params.get("SN") or params.get("sn") or "UNKNOWN_SN"
+    table = params.get("table") or "UNKNOWN"
 
     try:
         conn = get_conn()
@@ -120,7 +127,10 @@ async def iclock_cdata(request: Request):
 
         if request.method == "GET":
             # Handshake del dispositivo
-            data = {"method": "GET", "query": params}
+            payload = {
+                "method": "GET",
+                "query": params,
+            }
             cur.execute(
                 """
                 INSERT INTO marcajes (
@@ -129,129 +139,61 @@ async def iclock_cdata(request: Request):
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                ("HANDSHAKE", now, sn, sn, "HANDSHAKE", "GET", Json(data)),
+                (
+                    "HANDSHAKE",    # zk_user_id
+                    now,            # fecha_hora
+                    sn,             # dispositivo_codigo
+                    sn,             # sn
+                    "HANDSHAKE",    # tipo
+                    "GET",          # method
+                    Json(payload),
+                ),
             )
-
-        else:  # POST -> datos reales
+        else:
+            # POST -> recibimos payload crudo (ATTLOG, OPERLOG, lo que sea)
             raw_bytes = await request.body()
             raw_text = raw_bytes.decode("utf-8", errors="ignore") if raw_bytes else ""
-            lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
 
-            for line in lines:
-                parts = line.split("\t")
-                if not parts:
-                    continue
+            payload = {
+                "method": "POST",
+                "query": params,
+                "raw": raw_text,
+            }
 
-                first = parts[0]
-
-                # --- DEVINFO (~DeviceName=...) ---
-                if first.startswith("~"):
-                    data = {
-                        "sn": sn,
-                        "raw": line,
-                        "tipo": "DEVINFO",
-                        "method": "POST",
-                    }
-                    cur.execute(
-                        """
-                        INSERT INTO marcajes (
-                            zk_user_id, fecha_hora, dispositivo_codigo,
-                            sn, tipo, method, bruto_json
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        ("DEVINFO", now, sn, sn, "DEVINFO", "POST", Json(data)),
-                    )
-                    continue
-
-                # --- OPLOG ... ---
-                if first.startswith("OPLOG"):
-                    data = {
-                        "sn": sn,
-                        "raw": line,
-                        "tipo": "OPLOG",
-                        "method": "POST",
-                    }
-                    cur.execute(
-                        """
-                        INSERT INTO marcajes (
-                            zk_user_id, fecha_hora, dispositivo_codigo,
-                            sn, tipo, method, bruto_json
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        ("OPLOG", now, sn, sn, "OPLOG", "POST", Json(data)),
-                    )
-                    continue
-
-                # --- ATTLOG (marcajes) ---
-                if len(parts) >= 2:
-                    pin = parts[0].strip()
-                    time_str = parts[1].strip()
-                    verified = parts[2].strip() if len(parts) > 2 else None
-                    status = parts[3].strip() if len(parts) > 3 else None
-                    workcode = parts[4].strip() if len(parts) > 4 else None
-
-                    try:
-                        ts = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
-                    except Exception:
-                        ts = now
-
-                    data = {
-                        "sn": sn,
-                        "pin": pin,
-                        "raw": line,
-                        "time": time_str,
-                        "tipo": "ATTLOG",
-                        "method": "POST",
-                        "status": status,
-                        "verified": verified,
-                        "workcode": workcode,
-                    }
-
-                    cur.execute(
-                        """
-                        INSERT INTO marcajes (
-                            zk_user_id, fecha_hora, dispositivo_codigo,
-                            sn, tipo, method, verified, status, workcode, bruto_json
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (zk_user_id, fecha_hora, dispositivo_codigo) DO NOTHING
-                        """,
-                        (
-                            pin,          # zk_user_id
-                            ts,           # fecha_hora
-                            sn,           # dispositivo_codigo
-                            sn,           # sn
-                            "ATTLOG",     # tipo
-                            "POST",       # method
-                            verified,
-                            status,
-                            workcode,
-                            Json(data),
-                        ),
-                    )
-                else:
-                    # línea rara que no encaja en nada; se guarda cruda
-                    cur.execute(
-                        """
-                        INSERT INTO marcajes (
-                            zk_user_id, fecha_hora, dispositivo_codigo,
-                            sn, tipo, method, bruto_json
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        ("UNKNOWN", now, sn, sn, "UNKNOWN", "POST", Json({"raw": line})),
-                    )
+            # IMPORTANTE:
+            # - zk_user_id lo dejamos NULL para no violar el unique
+            #   (en Postgres, NULL en UNIQUE no choca entre filas).
+            # - tipo lo marcamos con el table=... si viene, o UNKNOWN.
+            cur.execute(
+                """
+                INSERT INTO marcajes (
+                    zk_user_id, fecha_hora, dispositivo_codigo,
+                    sn, tipo, method, bruto_json
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    None,          # zk_user_id (NULL → no choca en UNIQUE)
+                    now,           # fecha_hora (momento de recepción)
+                    sn,            # dispositivo_codigo
+                    sn,            # sn
+                    table,         # tipo (ATTLOG, OPERLOG, etc., si viene)
+                    "POST",        # method
+                    Json(payload),
+                ),
+            )
 
         conn.commit()
         cur.close()
         conn.close()
     except Exception as e:
+        # Log para ver el error si algo va mal
+        print("ERROR en /iclock/cdata:", e)
         raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
     # ZKTeco espera texto plano "OK"
     return PlainTextResponse("OK")
+
 
 
 # ============================================================
