@@ -230,39 +230,3 @@ async def iclock_cdata(request: Request):
         raise HTTPException(status_code=500, detail=f"DB error: {e}")
 
     return PlainTextResponse("OK")
-
-# --- Endpoint para comandos del dispositivo (de momento sin comandos) ---
-@app.get("/iclock/getrequest")
-async def iclock_getrequest(request: Request):
-    now = datetime.utcnow()
-    params = dict(request.query_params)
-    sn = params.get("SN") or params.get("sn") or "UNKNOWN_SN"
-
-    # Opcional: loguear el handshake de comandos
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo,
-                                  sn, tipo, method, bruto_json)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """,
-            ("GETREQUEST", now, sn, sn, "GETREQUEST", "GET", Json({"query": params})),
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception:
-        # Si falla BD, no queremos tumbar la comunicación con el reloj
-        pass
-
-    # Si no hay comandos pendientes, se devuelve vacío
-    return PlainTextResponse("")
-
-
-# Algunos modelos usan /iclock/devicecmd para lo mismo.
-@app.get("/iclock/devicecmd")
-async def iclock_devicecmd(request: Request):
-    # Reutilizamos la misma lógica
-    return await iclock_getrequest(request)
