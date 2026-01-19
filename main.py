@@ -1,5 +1,7 @@
 import logging
 import os
+import json
+import traceback
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Body, Request
@@ -10,7 +12,6 @@ from psycopg2.extras import Json
 
 app = FastAPI()
 
-# CORS por si acaso
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,13 +20,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Configuración de variables de entorno
 DB_HOST = os.getenv("DB_HOST")
 DB_PORT = os.getenv("DB_PORT", "5432")
 DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
-ZK_TOKEN = os.getenv("ZK_TOKEN", "mytoken")  # valor por defecto
-
 
 def get_conn():
     return psycopg2.connect(
@@ -36,359 +36,120 @@ def get_conn():
         password=DB_PASS,
     )
 
-
 # ============================================================
-#  Endpoint de pruebas manuales con JSON (/zk/{token})
-#  (NO lo usa el reloj, solo Postman / Swagger)
-# ============================================================
-@app.post("/zk/{token}")
-async def receive_zk(
-    token: str,
-    body: dict = Body(
-        ...,
-        example={
-            "user_id": "123",
-            "timestamp": "2025-12-08 14:30:00",
-            "device_id": "TEST01",
-            "DeviceID": "001",
-            "sn": "SERIAL123",
-        },
-    ),
-):
-    if token != ZK_TOKEN:
-        raise HTTPException(status_code=403, detail="Token invalid")
-
-    user = str(
-        body.get("user_id")
-        or body.get("pin")
-        or body.get("PIN")
-        or "unknown"
-    )
-
-    raw_ts = (
-        body.get("timestamp")
-        or body.get("time")
-        or body.get("LogTime")
-    )
-    try:
-        ts = datetime.fromisoformat(str(raw_ts).replace("T", " ").split(".")[0])
-    except Exception:
-        ts = datetime.utcnow()
-
-    dispositivo_codigo = (
-        str(body.get("device_id"))
-        or str(body.get("DeviceID"))
-        or str(body.get("sn"))
-        or "DESCONOCIDO"
-    )
-
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        # aquí no usamos sn/tipo/etc. porque es solo para pruebas
-        cur.execute(
-            """
-            INSERT INTO logs (zk_user_id, fecha_hora, dispositivo_codigo, bruto_json)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (zk_user_id, fecha_hora, dispositivo_codigo) DO NOTHING
-            """,
-            (user, ts, dispositivo_codigo, Json(body)),
-        )
-        conn.commit()
-        
-    except Exception as e:
-        try:
-            # Insertar en log de errores
-            cur.execute(
-                """
-                INSERT INTO marcajes_error_log 
-                (error_message, zk_user_id, fecha_hora, dispositivo_codigo, bruto_json, original_body, stack_trace)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    str(e),
-                    user,
-                    ts,
-                    dispositivo_codigo,
-                    Json(body),  # JSON estructurado
-                    json.dumps(body),  # Texto plano para debugging
-                    traceback.format_exc()
-                )
-            )
-            conn.commit()
-        except Exception as log_error:
-            # Si falla el log, al menos registrar en consola/archivo
-            print(f"Error crítico - No se pudo loguear: {log_error}")
-            print(f"Original error: {e}")
-            print(f"Original body: {json.dumps(body)}")
-       
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
-    finally:
-        if 'cur' in locals():
-            cur.close()
-        if 'conn' in locals():
-            conn.close()
-
-    print("ZK JSON ENDPOINT /zk HIT:", body)
-    return {"OK": True}
-
-
-# ============================================================
-#  Endpoint oficial ADMS ZKTeco: /iclock/cdata
-#  - GET: handshake
-#  - POST: marcajes ATTLOG, OPLOG, DEVINFO
+#  ENDPOINT OFICIAL ADMS: /iclock/cdata
 # ============================================================
 @app.api_route("/iclock/cdata", methods=["GET", "POST"])
 async def iclock_cdata(request: Request):
-    """
-    Modo CAJA NEGRA:
-    - GET: guardamos handshake con query params.
-    - POST: guardamos TODO el body crudo + query params.
-    No se intenta parsear ATTLOG/OPLOG/DEVINFO.
-    """
     now = datetime.utcnow()
     params = dict(request.query_params)
     sn = params.get("SN") or params.get("sn") or "UNKNOWN_SN"
     table = params.get("table") or "UNKNOWN"
+    
+    conn = None
+    cur = None
 
     try:
         conn = get_conn()
         cur = conn.cursor()
 
         if request.method == "GET":
-            # Handshake del dispositivo
-            payload = {
-                "method": "GET",
-                "query": params,
-            }
+            # 1. Log del Handshake
             cur.execute(
                 """
-                INSERT INTO logs (
-                    zk_user_id, fecha_hora, dispositivo_codigo,
-                    sn, tipo, method, bruto_json
-                )
+                INSERT INTO logs (zk_user_id, fecha_hora, dispositivo_codigo, sn, tipo, method, bruto_json)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
-                (
-                    "HANDSHAKE",    # zk_user_id
-                    now,            # fecha_hora
-                    sn,             # dispositivo_codigo
-                    sn,             # sn
-                    "HANDSHAKE",    # tipo
-                    "GET",          # method
-                    Json(payload),
-                ),
+                ("HANDSHAKE", now, sn, sn, "HANDSHAKE", "GET", Json({"query": params}))
             )
+            conn.commit()
+
+            # 2. Respuesta con parámetros para activar el envío de datos
+            content = (
+                f"GET OPTION FROM: SN={sn}\r\n"
+                "RegistryCode=V6.60\r\n"
+                "UpdateFlag=1\r\n"
+                "PushProtVer=2.4.1\r\n"
+                "ErrorDelay=30\r\n"
+                "Delay=10\r\n"
+                "TransInterval=1\r\n"
+                "TransFlag=1111000000\r\n"
+                "TimeZone=5\r\n"
+                "Realtime=1\r\n"
+            )
+            return PlainTextResponse(content)
+
         else:
-            # POST -> recibimos payload crudo (ATTLOG, OPERLOG, lo que sea)
+            # BLOQUE POST: Recibir marcaciones
             raw_bytes = await request.body()
             raw_text = raw_bytes.decode("utf-8", errors="ignore") if raw_bytes else ""
             lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
 
             for line in lines:
                 parts = line.split("\t")
-                if not parts:
-                    continue
-
+                if not parts: continue
+                
                 first = parts[0]
 
-                # --- DEVINFO (~DeviceName=...) ---
-                if first.startswith("~"):
-                    data = {
-                        "sn": sn,
-                        "raw": line,
-                        "tipo": "DEVINFO",
-                        "method": "POST",
-                    }
+                # Caso A: DEVINFO u OPLOG
+                if first.startswith("~") or first.startswith("OPLOG"):
+                    tipo_log = "DEVINFO" if first.startswith("~") else "OPLOG"
                     cur.execute(
-                        """
-                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo,
-                                              sn, tipo, method, bruto_json)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        ("DEVINFO", now, sn, sn, "DEVINFO", "POST", Json(data)),
+                        "INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, sn, tipo, method, bruto_json) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        (tipo_log, now, sn, sn, tipo_log, "POST", Json({"raw": line}))
                     )
-                    continue
-
-                # --- OPLOG ... ---
-                if first.startswith("OPLOG"):
-                    data = {
-                        "sn": sn,
-                        "raw": line,
-                        "tipo": "OPLOG",
-                        "method": "POST",
-                    }
-                    cur.execute(
-                        """
-                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo,
-                                              sn, tipo, method, bruto_json)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        ("OPLOG", now, sn, sn, "OPLOG", "POST", Json(data)),
-                    )
-                    continue
-
-                # --- ATTLOG (marcajes) ---
-                if len(parts) >= 2:
+                
+                # Caso B: ATTLOG (Marcaciones reales)
+                elif len(parts) >= 2:
                     pin = parts[0].strip()
                     time_str = parts[1].strip()
                     verified = parts[2].strip() if len(parts) > 2 else None
                     status = parts[3].strip() if len(parts) > 3 else None
-                    workcode = parts[4].strip() if len(parts) > 4 else None
-
+                    
                     try:
                         ts = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
-                    except Exception:
+                    except:
                         ts = now
 
-                    data = {
-                        "sn": sn,
-                        "pin": pin,
-                        "raw": line,
-                        "time": time_str,
-                        "tipo": "ATTLOG",
-                        "method": "POST",
-                        "status": status,
-                        "verified": verified,
-                        "workcode": workcode,
-                    }
-
                     cur.execute(
                         """
-                        INSERT INTO marcajes (
-                            zk_user_id, fecha_hora, dispositivo_codigo,
-                            sn, tipo, method, verified, status, workcode, bruto_json
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, sn, tipo, method, verified, status, bruto_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING
                         """,
-                        (
-                            pin,
-                            ts,
-                            sn,
-                            sn,
-                            "ATTLOG",
-                            "POST",
-                            verified,
-                            status,
-                            workcode,
-                            Json(data),
-                        ),
+                        (pin, ts, sn, sn, "ATTLOG", "POST", verified, status, Json({"raw": line}))
                     )
-                    print("✅ Marcaje guardado exitosamente")
-                else:
-                    cur.execute(
-                        """
-                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo,
-                                              sn, tipo, method, bruto_json)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        ("UNKNOWN", now, sn, sn, "UNKNOWN", "POST", Json({"raw": line})),
-                    )
-                    print("⚠️ Revisar body en marcajes")
-
-        conn.commit()
-    except Exception as e:
-        try:
-            # Insertar en log de errores
-            cur.execute(
-                """
-                INSERT INTO marcajes_error_log 
-                (error_message, zk_user_id, fecha_hora, dispositivo_codigo, bruto_json, original_body, stack_trace)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    str(e),
-                    "UNKNOWN",
-                    now,
-                    sn,
-                    None,  # JSON estructurado
-                    raw_text,  # Texto plano para debugging
-                    traceback.format_exc()
-                )
-            )
+            
             conn.commit()
-        except Exception as log_error:
-            # Log para ver el error si algo va mal
-            print("⚠️ ERROR en /iclock/cdata:", log_error)
-            print(f"Original body: {json.dumps(body)}")
-        
-        #No se debe retornar error para no bloquear al biométrico
-        #raise HTTPException(status_code=500, detail=f"DB error: {e}")
-        
+
+    except Exception as e:
+        # Log de errores en tabla secundaria para no perder el rastro
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO marcajes_error_log (error_message, dispositivo_codigo, original_body, stack_trace) VALUES (%s, %s, %s, %s)",
+                    (str(e), sn, raw_text if 'raw_text' in locals() else str(params), traceback.format_exc())
+                )
+                conn.commit()
+            except:
+                pass
+        print(f"❌ Error procesando datos de {sn}: {e}")
+
     finally:
-        if 'cur' in locals():
-            cur.close()
-        if 'conn' in locals():
-            conn.close()
-    
-    # ZKTeco espera texto plano "OK"
+        if cur: cur.close()
+        if conn: conn.close()
+
+    # Siempre responder OK para que el biométrico no se bloquee
     return PlainTextResponse("OK")
 
-def parse_adms_payload(raw_text):
-    """
-    Parsea el texto plano de ZKTeco (separado por tabuladores y saltos de línea).
-    Retorna una lista de diccionarios con los datos encontrados.
-    """
-    records = []
-    if not raw_text:
-        return records
-
-    lines = raw_text.split('\n')
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        
-        # Diccionario para cada línea (cada marcaje)
-        data = {}
-        # El equipo separa los campos con tabuladores (\t)
-        parts = line.split('\t')
-        for part in parts:
-            if '=' in part:
-                key, value = part.split('=', 1)
-                data[key.strip()] = value.strip()
-        
-        if data:
-            records.append(data)
-            
-    return records
-
 # ============================================================
-#  Endpoints para comandos (de momento sin comandos)
-#  /iclock/getrequest y /iclock/devicecmd
+#  ENDPOINTS DE COMANDOS (Obligatorios para el flujo ADMS)
 # ============================================================
 @app.get("/iclock/getrequest")
 async def iclock_getrequest(request: Request):
-    now = datetime.utcnow()
-    params = dict(request.query_params)
-    sn = params.get("SN") or params.get("sn") or "UNKNOWN_SN"
+    return PlainTextResponse("OK")
 
-    # opcional: loguear que el equipo pidió comandos
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO logs (
-                zk_user_id, fecha_hora, dispositivo_codigo,
-                sn, tipo, method, bruto_json
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """,
-            ("GETREQUEST", now, sn, sn, "GETREQUEST", "GET", Json({"query": params})),
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception:
-        # si falla BD, no bloqueamos la comunicación
-        pass
-
-    # Por ahora no enviamos comandos, así que respondemos vacío
-    return PlainTextResponse("")
-
-
-@app.get("/iclock/devicecmd")
+@app.post("/iclock/devicecmd")
 async def iclock_devicecmd(request: Request):
-    # algunos firmwares consultan aquí en vez de /iclock/getrequest
-    return await iclock_getrequest(request)
+    return PlainTextResponse("OK")
