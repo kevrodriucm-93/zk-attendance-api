@@ -94,10 +94,39 @@ async def receive_zk(
             (user, ts, dispositivo_codigo, Json(body)),
         )
         conn.commit()
-        cur.close()
-        conn.close()
+        
     except Exception as e:
+        try:
+            # Insertar en log de errores
+            cur.execute(
+                """
+                INSERT INTO marcajes_error_log 
+                (error_message, zk_user_id, fecha_hora, dispositivo_codigo, bruto_json, original_body, stack_trace)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    str(e),
+                    user,
+                    ts,
+                    dispositivo_codigo,
+                    Json(body),  # JSON estructurado
+                    json.dumps(body),  # Texto plano para debugging
+                    traceback.format_exc()
+                )
+            )
+            conn.commit()
+        except Exception as log_error:
+            # Si falla el log, al menos registrar en consola/archivo
+            print(f"Error crítico - No se pudo loguear: {log_error}")
+            print(f"Original error: {e}")
+            print(f"Original body: {json.dumps(body)}")
+       
         raise HTTPException(status_code=500, detail=f"DB error: {e}")
+    finally:
+        if 'cur' in locals():
+            cur.close()
+        if 'conn' in locals():
+            conn.close()
 
     print("ZK JSON ENDPOINT /zk HIT:", body)
     return {"ok": True}
