@@ -214,6 +214,7 @@ async def iclock_cdata(request: Request):
             )
 
         conn.commit()
+        print("✅ Marcaje guardado exitosamente")
     except Exception as e:
         try:
             # Insertar en log de errores
@@ -236,20 +237,20 @@ async def iclock_cdata(request: Request):
             conn.commit()
         except Exception as log_error:
             # Log para ver el error si algo va mal
-            print("ERROR en /iclock/cdata:", e)
+            print("⚠️ ERROR en /iclock/cdata:", log_error)
             print(f"Original body: {json.dumps(body)}")
         
         #No se debe retornar error para no bloquear al biométrico
         #raise HTTPException(status_code=500, detail=f"DB error: {e}")
         
-        # ZKTeco espera texto plano "OK"
-        return PlainTextResponse("OK")
     finally:
         if 'cur' in locals():
             cur.close()
         if 'conn' in locals():
             conn.close()
-            
+    
+    # ZKTeco espera texto plano "OK"
+    return PlainTextResponse("OK")       
 
 
 
