@@ -88,7 +88,7 @@ async def receive_zk(
         # aquí no usamos sn/tipo/etc. porque es solo para pruebas
         cur.execute(
             """
-            INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, bruto_json)
+            INSERT INTO logs (zk_user_id, fecha_hora, dispositivo_codigo, bruto_json)
             VALUES (%s, %s, %s, %s)
             ON CONFLICT (zk_user_id, fecha_hora, dispositivo_codigo) DO NOTHING
             """,
@@ -163,7 +163,7 @@ async def iclock_cdata(request: Request):
             }
             cur.execute(
                 """
-                INSERT INTO marcajes (
+                INSERT INTO logs (
                     zk_user_id, fecha_hora, dispositivo_codigo,
                     sn, tipo, method, bruto_json
                 )
@@ -183,43 +183,110 @@ async def iclock_cdata(request: Request):
             # POST -> recibimos payload crudo (ATTLOG, OPERLOG, lo que sea)
             raw_bytes = await request.body()
             raw_text = raw_bytes.decode("utf-8", errors="ignore") if raw_bytes else ""
-            
-            # Extraemos todos los registros del cuerpo
-            marcajes_encontrados = parse_adms_payload(raw_text)
-            if not marcajes_encontrados:
-                # Si no hay datos (ej. un DEVINFO), guardamos el hit genérico
-                cur.execute(
-                    "INSERT INTO marcajes (sn, tipo, method, bruto_json) VALUES (%s, %s, %s, %s)",
-                    (sn, table, "POST", Json({"raw": raw_text, "query": params}))
-                )
-            else:
-                # Si hay marcajes (ATTLOG), los guardamos uno por uno
-                for reg in marcajes_encontrados:
-                    u_id = reg.get("USERID")
-                    # El equipo manda la fecha en formato YYYY-MM-DD HH:MM:SS
-                    u_time = reg.get("CHECKTIME")
-                    
+            lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+
+            for line in lines:
+                parts = line.split("\t")
+                if not parts:
+                    continue
+
+                first = parts[0]
+
+                # --- DEVINFO (~DeviceName=...) ---
+                if first.startswith("~"):
+                    data = {
+                        "sn": sn,
+                        "raw": line,
+                        "tipo": "DEVINFO",
+                        "method": "POST",
+                    }
+                    cur.execute(
+                        """
+                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo,
+                                              sn, tipo, method, bruto_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        ("DEVINFO", now, sn, sn, "DEVINFO", "POST", Json(data)),
+                    )
+                    continue
+
+                # --- OPLOG ... ---
+                if first.startswith("OPLOG"):
+                    data = {
+                        "sn": sn,
+                        "raw": line,
+                        "tipo": "OPLOG",
+                        "method": "POST",
+                    }
+                    cur.execute(
+                        """
+                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo,
+                                              sn, tipo, method, bruto_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        ("OPLOG", now, sn, sn, "OPLOG", "POST", Json(data)),
+                    )
+                    continue
+
+                # --- ATTLOG (marcajes) ---
+                if len(parts) >= 2:
+                    pin = parts[0].strip()
+                    time_str = parts[1].strip()
+                    verified = parts[2].strip() if len(parts) > 2 else None
+                    status = parts[3].strip() if len(parts) > 3 else None
+                    workcode = parts[4].strip() if len(parts) > 4 else None
+
+                    try:
+                        ts = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        ts = now
+
+                    data = {
+                        "sn": sn,
+                        "pin": pin,
+                        "raw": line,
+                        "time": time_str,
+                        "tipo": "ATTLOG",
+                        "method": "POST",
+                        "status": status,
+                        "verified": verified,
+                        "workcode": workcode,
+                    }
+
                     cur.execute(
                         """
                         INSERT INTO marcajes (
                             zk_user_id, fecha_hora, dispositivo_codigo,
-                            sn, tipo, method, bruto_json
+                            sn, tipo, method, verified, status, workcode, bruto_json
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
-                            u_id,
-                            u_time or now,
+                            pin,
+                            ts,
                             sn,
                             sn,
-                            table,
+                            "ATTLOG",
                             "POST",
-                            Json({"data": reg, "query": params})
+                            verified,
+                            status,
+                            workcode,
+                            Json(data),
                         ),
                     )
-        
+                    print("✅ Marcaje guardado exitosamente")
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo,
+                                              sn, tipo, method, bruto_json)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        ("UNKNOWN", now, sn, sn, "UNKNOWN", "POST", Json({"raw": line})),
+                    )
+                    print("⚠️ Revisar body en marcajes")
+
         conn.commit()
-        print("✅ Marcaje guardado exitosamente")
     except Exception as e:
         try:
             # Insertar en log de errores
@@ -231,11 +298,11 @@ async def iclock_cdata(request: Request):
                 """,
                 (
                     str(e),
-                    user,
-                    ts,
-                    dispositivo_codigo,
-                    Json(body),  # JSON estructurado
-                    json.dumps(body),  # Texto plano para debugging
+                    "UNKNOWN",
+                    now,
+                    sn,
+                    None,  # JSON estructurado
+                    raw_text,  # Texto plano para debugging
                     traceback.format_exc()
                 )
             )
@@ -302,7 +369,7 @@ async def iclock_getrequest(request: Request):
         cur = conn.cursor()
         cur.execute(
             """
-            INSERT INTO marcajes (
+            INSERT INTO logs (
                 zk_user_id, fecha_hora, dispositivo_codigo,
                 sn, tipo, method, bruto_json
             )
