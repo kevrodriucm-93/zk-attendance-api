@@ -80,7 +80,7 @@ async def iclock_cdata(request: Request):
             return PlainTextResponse(content)
 
         else:
-            # BLOQUE POST: Recibir marcaciones
+            # BLOQUE POST: Recibir marcaciones, info de dispositivo y logs de operación
             raw_bytes = await request.body()
             raw_text = raw_bytes.decode("utf-8", errors="ignore") if raw_bytes else ""
             lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
@@ -91,15 +91,21 @@ async def iclock_cdata(request: Request):
                 
                 first = parts[0]
 
-                # Caso A: DEVINFO u OPLOG
+                # --- Caso A: DEVINFO u OPLOG (Se mueven a la tabla LOGS) ---
                 if first.startswith("~") or first.startswith("OPLOG"):
                     tipo_log = "DEVINFO" if first.startswith("~") else "OPLOG"
                     cur.execute(
-                        "INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, sn, tipo, method, bruto_json) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        """
+                        INSERT INTO logs (
+                            zk_user_id, fecha_hora, dispositivo_codigo, 
+                            sn, tipo, method, bruto_json
+                        ) 
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
                         (tipo_log, now, sn, sn, tipo_log, "POST", Json({"raw": line}))
                     )
                 
-                # Caso B: ATTLOG (Marcaciones reales)
+                # --- Caso B: ATTLOG (Marcaciones reales, se quedan en MARCAJES) ---
                 elif len(parts) >= 2:
                     pin = parts[0].strip()
                     time_str = parts[1].strip()
@@ -113,15 +119,17 @@ async def iclock_cdata(request: Request):
 
                     cur.execute(
                         """
-                        INSERT INTO marcajes (zk_user_id, fecha_hora, dispositivo_codigo, sn, tipo, method, verified, status, bruto_json)
+                        INSERT INTO marcajes (
+                            zk_user_id, fecha_hora, dispositivo_codigo, 
+                            sn, tipo, method, verified, status, bruto_json
+                        )
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT DO NOTHING
+                        ON CONFLICT (zk_user_id, fecha_hora, dispositivo_codigo) DO NOTHING
                         """,
                         (pin, ts, sn, sn, "ATTLOG", "POST", verified, status, Json({"raw": line}))
                     )
             
             conn.commit()
-
     except Exception as e:
         # Log de errores en tabla secundaria para no perder el rastro
         if conn:
