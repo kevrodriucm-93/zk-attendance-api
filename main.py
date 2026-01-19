@@ -183,36 +183,41 @@ async def iclock_cdata(request: Request):
             # POST -> recibimos payload crudo (ATTLOG, OPERLOG, lo que sea)
             raw_bytes = await request.body()
             raw_text = raw_bytes.decode("utf-8", errors="ignore") if raw_bytes else ""
-
-            payload = {
-                "method": "POST",
-                "query": params,
-                "raw": raw_text,
-            }
-
-            # IMPORTANTE:
-            # - zk_user_id lo dejamos NULL para no violar el unique
-            #   (en Postgres, NULL en UNIQUE no choca entre filas).
-            # - tipo lo marcamos con el table=... si viene, o UNKNOWN.
-            cur.execute(
-                """
-                INSERT INTO marcajes (
-                    zk_user_id, fecha_hora, dispositivo_codigo,
-                    sn, tipo, method, bruto_json
+            
+            # Extraemos todos los registros del cuerpo
+            marcajes_encontrados = parse_adms_payload(raw_text)
+            if not marcajes_encontrados:
+                # Si no hay datos (ej. un DEVINFO), guardamos el hit genérico
+                cur.execute(
+                    "INSERT INTO marcajes (sn, tipo, method, bruto_json) VALUES (%s, %s, %s, %s)",
+                    (sn, table, "POST", Json({"raw": raw_text, "query": params}))
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    None,          # zk_user_id (NULL → no choca en UNIQUE)
-                    now,           # fecha_hora (momento de recepción)
-                    sn,            # dispositivo_codigo
-                    sn,            # sn
-                    table,         # tipo (ATTLOG, OPERLOG, etc., si viene)
-                    "POST",        # method
-                    Json(payload),
-                ),
-            )
-
+            else:
+                # Si hay marcajes (ATTLOG), los guardamos uno por uno
+                for reg in marcajes_encontrados:
+                    u_id = reg.get("USERID")
+                    # El equipo manda la fecha en formato YYYY-MM-DD HH:MM:SS
+                    u_time = reg.get("CHECKTIME")
+                    
+                    cur.execute(
+                        """
+                        INSERT INTO marcajes (
+                            zk_user_id, fecha_hora, dispositivo_codigo,
+                            sn, tipo, method, bruto_json
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            u_id,
+                            u_time or now,
+                            sn,
+                            sn,
+                            table,
+                            "POST",
+                            Json({"data": reg, "query": params})
+                        ),
+                    )
+        
         conn.commit()
         print("✅ Marcaje guardado exitosamente")
     except Exception as e:
@@ -250,9 +255,36 @@ async def iclock_cdata(request: Request):
             conn.close()
     
     # ZKTeco espera texto plano "OK"
-    return PlainTextResponse("OK")       
+    return PlainTextResponse("OK")
 
+def parse_adms_payload(raw_text):
+    """
+    Parsea el texto plano de ZKTeco (separado por tabuladores y saltos de línea).
+    Retorna una lista de diccionarios con los datos encontrados.
+    """
+    records = []
+    if not raw_text:
+        return records
 
+    lines = raw_text.split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Diccionario para cada línea (cada marcaje)
+        data = {}
+        # El equipo separa los campos con tabuladores (\t)
+        parts = line.split('\t')
+        for part in parts:
+            if '=' in part:
+                key, value = part.split('=', 1)
+                data[key.strip()] = value.strip()
+        
+        if data:
+            records.append(data)
+            
+    return records
 
 # ============================================================
 #  Endpoints para comandos (de momento sin comandos)
