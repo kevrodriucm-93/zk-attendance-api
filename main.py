@@ -130,7 +130,7 @@ async def receive_zk(
             conn.close()
 
     print("ZK JSON ENDPOINT /zk HIT:", body)
-    return {"ok": True}
+    return {"OK": True}
 
 
 # ============================================================
@@ -214,15 +214,42 @@ async def iclock_cdata(request: Request):
             )
 
         conn.commit()
-        cur.close()
-        conn.close()
     except Exception as e:
-        # Log para ver el error si algo va mal
-        print("ERROR en /iclock/cdata:", e)
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
-
-    # ZKTeco espera texto plano "OK"
-    return PlainTextResponse("OK")
+        try:
+            # Insertar en log de errores
+            cur.execute(
+                """
+                INSERT INTO marcajes_error_log 
+                (error_message, zk_user_id, fecha_hora, dispositivo_codigo, bruto_json, original_body, stack_trace)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    str(e),
+                    user,
+                    ts,
+                    dispositivo_codigo,
+                    Json(body),  # JSON estructurado
+                    json.dumps(body),  # Texto plano para debugging
+                    traceback.format_exc()
+                )
+            )
+            conn.commit()
+        except Exception as log_error:
+            # Log para ver el error si algo va mal
+            print("ERROR en /iclock/cdata:", e)
+            print(f"Original body: {json.dumps(body)}")
+        
+        #No se debe retornar error para no bloquear al biométrico
+        #raise HTTPException(status_code=500, detail=f"DB error: {e}")
+        
+        # ZKTeco espera texto plano "OK"
+        return PlainTextResponse("OK")
+    finally:
+        if 'cur' in locals():
+            cur.close()
+        if 'conn' in locals():
+            conn.close()
+            
 
 
 
